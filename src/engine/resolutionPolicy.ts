@@ -10,6 +10,13 @@ export const MOBILE_OUTPUT_DPR_CAP = 3;
 // preventing large tablets/foldables from silently allocating a 5-10 MP
 // default framebuffer plus equally large reconstruction targets.
 export const MOBILE_OUTPUT_PIXEL_BUDGET = 4_000_000;
+// Low-end path (Mali-G52 / Helio G81 class, e.g. Redmi 15C): the EASU/RCAS
+// reconstruction and every native-size pass scale with OUTPUT pixels. Capping
+// Performance at ~1.6 DPR / ~1.6 MP cuts the final-blit, SMAA-source and
+// browser-composite cost ~40-55% on a 720p phone while the internal raster
+// stays CSS-native (readability floor) and the DOM HUD stays untouched.
+export const MOBILE_LOW_OUTPUT_DPR_CAP = 1.6;
+export const MOBILE_LOW_OUTPUT_PIXEL_BUDGET = 1_600_000;
 
 type NumericInput = number | null | undefined;
 
@@ -19,6 +26,8 @@ export interface OutputResolutionOptions {
   devicePixelRatio?: NumericInput;
   mobile?: boolean;
   mobilePixelBudget?: NumericInput;
+  /** Mobile-low (Performance) path: cap the backing store below phone-native. */
+  lowPower?: boolean;
 }
 
 export interface OutputResolution {
@@ -45,13 +54,20 @@ export function outputPixelRatio({
   devicePixelRatio = 1,
   mobile = false,
   mobilePixelBudget = MOBILE_OUTPUT_PIXEL_BUDGET,
+  lowPower = false,
 }: OutputResolutionOptions = {}): number {
   const dpr = finitePositive(devicePixelRatio, 1);
-  const cap = mobile ? MOBILE_OUTPUT_DPR_CAP : DESKTOP_OUTPUT_DPR_CAP;
+  const useLowPower = mobile && lowPower;
+  const cap = useLowPower
+    ? MOBILE_LOW_OUTPUT_DPR_CAP
+    : mobile ? MOBILE_OUTPUT_DPR_CAP : DESKTOP_OUTPUT_DPR_CAP;
   const desired = Math.min(dpr, cap);
   if (!mobile) return desired;
+  const budget = useLowPower
+    ? Math.min(finitePositive(mobilePixelBudget, MOBILE_OUTPUT_PIXEL_BUDGET), MOBILE_LOW_OUTPUT_PIXEL_BUDGET)
+    : finitePositive(mobilePixelBudget, MOBILE_OUTPUT_PIXEL_BUDGET);
   const area = Math.max(1, finitePositive(width, 1) * finitePositive(height, 1));
-  const budgetRatio = Math.sqrt(finitePositive(mobilePixelBudget, MOBILE_OUTPUT_PIXEL_BUDGET) / area);
+  const budgetRatio = Math.sqrt(budget / area);
   return Math.min(desired, Math.max(1, budgetRatio));
 }
 
@@ -77,7 +93,8 @@ export function outputResolution(
     // IEEE-754 spacing cannot make a subtraction equal the non-dyadic 0.001
     // literal exactly, so < and <= have no observable input distinction.
     native: Math.abs(pixelRatio - devicePixelRatio) < 0.001,
-    budgetLimited: !!options.mobile && pixelRatio + 0.001 < Math.min(devicePixelRatio, MOBILE_OUTPUT_DPR_CAP),
+    budgetLimited: !!options.mobile && pixelRatio + 0.001 < Math.min(devicePixelRatio,
+      options.lowPower ? MOBILE_LOW_OUTPUT_DPR_CAP : MOBILE_OUTPUT_DPR_CAP),
   };
 }
 

@@ -1719,9 +1719,14 @@ export function createPost(
   );
   const sceneAA = new SceneAAPass(scene, camera, sceneTarget);
   const lateFx = new LateFxPass(scene, camera, sceneTarget, lateTarget, softState);
+  // Low-end Performance preset skips the 3-pass display-space SMAA: at
+  // CSS-native internal density the FSR1 upscale already owns edge
+  // reconstruction, and those fullscreen passes are pure fragment cost on a
+  // Mali-G52. Other presets keep high-preset SMAA + FSR1.
+  const smaaEnabledForPreset = (p: QualityPreset): boolean => !p.disableSmaa;
   const publishAAState = (): void => {
     renderer.domElement.dataset.sceneMsaaSamples = String(msaaSamples);
-    renderer.domElement.dataset.postAa = 'smaa-high+fsr1';
+    renderer.domElement.dataset.postAa = smaaEnabledForPreset(preset) ? 'smaa-high+fsr1' : 'linear+fsr1';
   };
   publishAAState();
   composer.addPass(sceneAA); // 1. multisampled scene + single resolve
@@ -2072,6 +2077,8 @@ export function createPost(
   if (smaa._materialWeights && smaa._materialWeights.defines) {
     smaa._materialWeights.defines.SMAA_MAX_SEARCH_STEPS = '16';
   }
+  smaa.enabled = smaaEnabledForPreset(preset);
+  publishAAState();
   composer.addPass(smaa); // 5. edge-pattern AA (geometric silhouettes)
 
   // 6. Native-output spatial reconstruction. SMAA first resolves the geometric
@@ -2446,7 +2453,9 @@ export function createPost(
     dynGovern(adaptiveFrameSeconds(dt, frameWallDtSeconds));
     updateAerialZoom();
     grade.uniforms.uExposure.value = scene.userData.postExposure || 1;
-    aerial.uniforms.uCloudShade.value = scene.userData.cloudShadeAmp ?? CLOUD_SHADE_DEFAULT;
+    aerial.uniforms.uCloudShade.value = preset.simplifiedAerial
+      ? 0
+      : scene.userData.cloudShadeAmp ?? CLOUD_SHADE_DEFAULT;
     updateScopeGrade();
     updateAerialFogColors();
     updateAerialCameraBasis();
@@ -2472,6 +2481,7 @@ export function createPost(
     applyAoSampling(preset);
     msaaSamples = samplesForPreset(preset);
     sceneAA.setSamples(msaaSamples);
+    smaa.enabled = smaaEnabledForPreset(preset);
     publishAAState();
     // perf-governor r1: a preset switch is a new baseline — release every
     // session trim (the new tier's own levers take over) and recompute AO.

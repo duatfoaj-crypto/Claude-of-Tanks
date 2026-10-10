@@ -13,7 +13,7 @@
  * resolution governor.
  */
 import * as THREE from 'three';
-import { getDeviceTier, resolveDeviceTier, noteGpuRenderer } from './quality.ts';
+import { getDeviceTier, getPreset, onPresetChange, resolveDeviceTier, noteGpuRenderer } from './quality.ts';
 import { outputResolution, type OutputResolution } from './resolutionPolicy.ts';
 import { routeShadowOnlyLayer } from './renderLayers.ts';
 
@@ -34,16 +34,24 @@ export type GameRenderer = THREE.WebGLRenderer & {
 // DPR-2 canvas that the browser stretches a second time. Large mobile/tablet
 // viewports remain bounded by resolutionPolicy's output-pixel budget; the
 // composer's independently adaptive resolution still owns the heavy work.
+// Performance (mobile-low) on low-end GPUs caps the backing store at ~1.6 DPR
+// / ~1.6 MP: the final EASU/RCAS blit and the browser composite scale with
+// OUTPUT pixels, so this is the cheapest large lever on a Mali-G52.
 function applyOutputResolution(
   renderer: THREE.WebGLRenderer,
   width: number,
   height: number,
 ): OutputResolution {
+  let lowPower = false;
+  try {
+    lowPower = getDeviceTier() === 'mobile' && !!getPreset().lowPowerOutput;
+  } catch (_) { /* headless/tests — desktop default */ }
   const resolution = outputResolution({
     width,
     height,
     devicePixelRatio: window.devicePixelRatio || 1,
     mobile: getDeviceTier() === 'mobile',
+    lowPower,
   });
   renderer.setPixelRatio(resolution.pixelRatio);
   (renderer as GameRenderer).userData.outputResolution = resolution;
@@ -146,6 +154,20 @@ export function createRenderer(container: HTMLElement): GameRenderer {
   routeShadowOnlyLayer(renderer);
 
   container.appendChild(renderer.domElement);
+  // A live preset switch (Settings tap or the mobile governor step-down) may
+  // change the output-density cap. Re-fit the backing store without waiting
+  // for the next resize/orientation event; post.ts owns the composer chain.
+  try {
+    onPresetChange(() => {
+      try {
+        const parent = renderer.domElement.parentElement;
+        const w = (parent && parent.clientWidth) || window.innerWidth;
+        const h = (parent && parent.clientHeight) || window.innerHeight;
+        applyOutputResolution(renderer, w, h);
+        renderer.setSize(w, h);
+      } catch (_) { /* resize remains the fallback */ }
+    });
+  } catch (_) { /* headless/tests */ }
   return renderer;
 }
 

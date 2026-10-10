@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import {
+  MOBILE_LOW_OUTPUT_DPR_CAP,
+  MOBILE_LOW_OUTPUT_PIXEL_BUDGET,
   MOBILE_OUTPUT_PIXEL_BUDGET,
   outputPixelRatio,
   outputResolution,
@@ -98,5 +100,38 @@ globalThis.window = { devicePixelRatio: 2.5 };
 assert.equal(uiPixelRatio(220, 220), 2,
   'browser HUD sizing defaults to the live display density and desktop cap');
 delete globalThis.window;
+
+// Low-power (Performance) output path for Mali-G52-class phones.
+assert.equal(MOBILE_LOW_OUTPUT_DPR_CAP, 1.6);
+assert.equal(MOBILE_LOW_OUTPUT_PIXEL_BUDGET, 1_600_000);
+assert.equal(
+  outputPixelRatio({ width: 390, height: 844, devicePixelRatio: 2, mobile: true, lowPower: true }),
+  1.6,
+  'Performance caps a 720p-class phone below native density');
+assert.equal(
+  outputPixelRatio({ width: 430, height: 932, devicePixelRatio: 3, mobile: true, lowPower: true }),
+  1.6,
+  'Performance holds the DPR cap even on DPR-3 displays');
+assert.equal(
+  outputPixelRatio({ width: 390, height: 844, devicePixelRatio: 2, mobile: true }),
+  2,
+  'Balanced keeps its native-density output contract');
+assert.equal(
+  outputPixelRatio({ width: 390, height: 844, devicePixelRatio: 2, mobile: false, lowPower: true }),
+  2,
+  'lowPower never changes the desktop DPR-2 cap');
+const lowPowerRes = outputResolution({
+  width: 390, height: 844, devicePixelRatio: 2, mobile: true, lowPower: true,
+});
+assert.equal(lowPowerRes.pixelRatio, 1.6);
+assert.equal(lowPowerRes.budgetLimited, false,
+  'DPR caps are not mislabeled as budget pressure (matches the desktop rule)');
+const lowPowerTablet = outputResolution({
+  width: 1024, height: 1366, devicePixelRatio: 3, mobile: true, lowPower: true,
+});
+assert.equal(lowPowerTablet.budgetLimited, true,
+  'large low-power viewports report their tighter budget limit honestly');
+assert.ok(lowPowerRes.outputPixels <= MOBILE_LOW_OUTPUT_PIXEL_BUDGET + lowPowerRes.bufferWidth + lowPowerRes.bufferHeight,
+  'Performance output stays inside its pixel budget');
 
 console.log('resolutionPolicy self-test passed');

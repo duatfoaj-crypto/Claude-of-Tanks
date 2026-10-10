@@ -95,4 +95,40 @@ assert.equal(freshDesktop.resolveDeviceTier({ capabilities: { maxTextureSize: 16
 assert.equal(freshDesktop.resolvePresetName(), 'high',
   'a new session re-runs stable hardware policy instead of inheriting load');
 
+// Low-end mobile path (Redmi 15C class: Mali-G52 / Helio G81, ~4 GB RAM).
+installBrowser('?tier=mobile', { memory: 4, cores: 8 });
+const lowEnd = await import('./quality.ts?quality-lowend-mobile-contract');
+assert.equal(lowEnd.resolveDeviceTier({ capabilities: { maxTextureSize: 4096 } }), 'mobile');
+lowEnd.noteGpuRenderer('Mali-G52 MC2');
+assert.equal(lowEnd.isLowEndMobileDevice(), true);
+assert.equal(lowEnd.resolveDefaultMobilePreset(), 'mobile-low');
+assert.equal(lowEnd.resolvePresetName(), 'mobile-low',
+  'low-end phones boot straight into Performance instead of lagging on Balanced');
+assert.equal(lowEnd.PRESETS['mobile-low'].disableSmaa, true);
+assert.equal(lowEnd.PRESETS['mobile-low'].lowPowerOutput, true);
+assert.equal(lowEnd.PRESETS['mobile-low'].simplifiedAerial, true);
+assert.equal(lowEnd.reportSustainedOverload(), false,
+  'Performance is already the floor — no further mobile step exists');
+
+// Mid/high mobile GPU on a healthy phone stays Balanced but can step down
+// under sustained load and recover (session-only, explicit taps win).
+installBrowser('?tier=mobile', { memory: 8, cores: 8 });
+const midMobile = await import('./quality.ts?quality-mid-mobile-contract');
+assert.equal(midMobile.resolveDeviceTier({ capabilities: { maxTextureSize: 8192 } }), 'mobile');
+midMobile.noteGpuRenderer('Apple A17 Pro GPU');
+assert.equal(midMobile.isLowEndMobileDevice(), false);
+assert.equal(midMobile.resolvePresetName(), 'mobile');
+assert.equal(midMobile.reportSustainedOverload(), true);
+assert.equal(midMobile.resolvePresetName(), 'mobile-low',
+  'unpinned Balanced steps down to Performance under sustained overload');
+assert.equal(midMobile.reportSustainedOverload(), false,
+  'the mobile floor holds instead of stepping past Performance');
+assert.equal(midMobile.canRecoverAutoTier(), true);
+assert.equal(midMobile.reportSustainedRecovery(), true);
+assert.equal(midMobile.resolvePresetName(), 'mobile',
+  'stable evidence restores one mobile step toward the boot default');
+midMobile.setMobilePresetName('mobile-high');
+assert.equal(midMobile.reportSustainedOverload(), false,
+  'an explicit user preset is authoritative over the mobile governor');
+
 console.log('quality.selftest: device, texture, preset, and subscription contracts passed');

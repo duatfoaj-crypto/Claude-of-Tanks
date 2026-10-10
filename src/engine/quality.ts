@@ -61,6 +61,12 @@ export interface QualityPreset {
   readonly textureScale?: number;
   readonly vehicleTextureScale?: number;
   readonly textureCap?: number;
+  /** Mobile-low only: skip display-space SMAA (3 fullscreen passes). */
+  readonly disableSmaa?: boolean;
+  /** Mobile-low only: cap the final canvas backing store below the phone-native budget. */
+  readonly lowPowerOutput?: boolean;
+  /** Mobile-low only: skip cloud-shade noise in the aerial pass. */
+  readonly simplifiedAerial?: boolean;
 }
 
 /**
@@ -270,6 +276,13 @@ export const PRESETS: Readonly<Record<PresetName, QualityPreset>> = {
     vehicleTextureScale: 0.75,
     textureCap: 2048,
     dynMin: 1.0,
+    // Low-end path (Redmi 15C / Helio G81 / Mali-G52 class): the final canvas
+    // is capped below phone-native density (see resolutionPolicy lowPower),
+    // display-space SMAA is skipped (the internal raster is already CSS-native
+    // and EASU owns the upscale), and the aerial cloud-shade octave is off.
+    disableSmaa: true,
+    lowPowerOutput: true,
+    simplifiedAerial: true,
   },
   // MOBILE r1: the DEVICE tier for phones/tablets — never offered by the
   // settings picker (PRESET_ORDER below is unchanged) and never resolved on a
@@ -352,6 +365,54 @@ const AUTO_ORDER: readonly AutoTier[] = ['low', 'medium', 'high']; // ultra stay
 let _gpuRendererString = '';
 let _autoPolicyHandled = false;
 let _sessionAutoTier: AutoTier | null = null;
+// Session-only mobile demotion (never persisted): the live governor may step
+// Balanced/Quality down toward Performance when the user never pinned a
+// choice. An explicit tap in Settings always wins and clears this.
+let _sessionMobilePreset: MobilePresetName | null = null;
+
+/**
+ * Low-end mobile heuristic (Redmi 15C class: Helio G81 / Mali-G52, ~4 GB RAM).
+ * Masked GPU strings are common on Android WebGL, so small memory or a tight
+ * texture cap also qualifies even when the renderer string is empty.
+ */
+export function isLowEndMobileDevice(): boolean {
+  const gpu = _gpuRendererString.toLowerCase();
+  if (/swiftshader|llvmpipe|software|basic render/.test(gpu)) return true;
+  if (/\b(mali|adreno|powervr|videocore|helio|mt6\d{3}|unisoc|tiger)\b/.test(gpu)) {
+    // High-end Adreno 7xx / Mali-G7xx on 8 GB+ phones stay Balanced; the
+    // classic low-end parts (Mali-G52/G57/T-series, Adreno 5xx/61x, PowerVR,
+    // VideoCore, Helio/Unisoc SoCs) start at Performance.
+    if (/\b(adreno\s*7\d\d|mali-g7\d\d|mali-g6\d\d)\b/.test(gpu)) {
+      try {
+        const mem = (navigator as DeviceNavigator).deviceMemory;
+        if (typeof mem === 'number' && mem <= 4) return true;
+      } catch (_) { /* unavailable */ }
+      return false;
+    }
+    return true;
+  }
+  try {
+    const nav = navigator as DeviceNavigator;
+    const mem = nav.deviceMemory;
+    if (typeof mem === 'number' && mem <= 4) return true;
+    if (typeof nav.hardwareConcurrency === 'number' && nav.hardwareConcurrency <= 4) return true;
+  } catch (_) { /* unavailable */ }
+  return _glMaxTexSize <= 4096;
+}
+
+/** Default mobile preset before any user choice: Performance on low-end GPUs. */
+export function resolveDefaultMobilePreset(): MobilePresetName {
+  return isLowEndMobileDevice() ? 'mobile-low' : 'mobile';
+}
+
+/** Explicit stored mobile preset, or null when the user never picked one. */
+function getStoredMobilePresetOrNull(): MobilePresetName | null {
+  try {
+    const v = window.localStorage.getItem(LS_MOBILE_KEY);
+    if (v === 'mobile-low' || v === 'mobile' || v === 'mobile-high') return v;
+  } catch (_) { /* storage blocked */ }
+  return null;
+}
 
 /** Record the unmasked GL renderer string (createRenderer calls this once). */
 export function noteGpuRenderer(str: string): void {
@@ -423,10 +484,13 @@ export function resolveAutoTier(): AutoTier {
  * → low) for this session and rebroadcasts the preset so every engine module
  * resizes live. No-op (returns false) when the user pinned an explicit
  * preset or the tier is already at the floor.
+ * Mobile: steps an unpinned Balanced/Quality choice down toward Performance
+ * for this session (Redmi 15C class starts there already; this catches
+ * devices that began higher before the load evidence arrived).
  * @returns {boolean} true if a tier step was applied
  */
 export function reportSustainedOverload(): boolean {
-  if (getDeviceTier() === 'mobile') return false;
+  if (getDeviceTier() === 'mobile') return reportMobileOverload();
   if (getStoredChoice() !== 'auto') return false;
   const cur = resolveAutoTier();
   const i = AUTO_ORDER.indexOf(cur);
@@ -442,11 +506,41 @@ export function reportSustainedOverload(): boolean {
   return true;
 }
 
+/**
+ * Session-only mobile step-down. Explicit user choices are authoritative;
+ * only the implicit default (no stored mobile preset) may move.
+ */
+function reportMobileOverload(): boolean {
+  if (getStoredMobilePresetOrNull() !== null) return false;
+  const cur = getMobilePresetChoice();
+  const i = MOBILE_PRESET_ORDER.indexOf(cur);
+  if (i <= 0) return false;
+  const next = MOBILE_PRESET_ORDER[i - 1];
+  if (!next) return false;
+  _sessionMobilePreset = next;
+  try {
+    console.info(`[quality] sustained mobile overload at '${cur}' — preset now '${next}' (pick a preset in Settings to override; ?gfxreset clears)`);
+  } catch (_) { /* ok */ }
+  const preset = getPreset();
+  for (const fn of listeners) fn(preset);
+  return true;
+}
+
 /** Whether measured stability can restore one auto tier without exceeding the hardware cap. */
 export function canRecoverAutoTier(): boolean {
-  if (getDeviceTier() === 'mobile' || getStoredChoice() !== 'auto') return false;
+  if (getDeviceTier() === 'mobile') return canRecoverMobileTier();
+  if (getStoredChoice() !== 'auto') return false;
   const currentIndex = AUTO_ORDER.indexOf(resolveAutoTier());
   const ceilingIndex = AUTO_ORDER.indexOf(heuristicAutoCap() ?? 'high');
+  return currentIndex >= 0 && currentIndex < ceilingIndex;
+}
+
+/** Mobile recovery ceiling is the boot default; low-end devices stay at Performance. */
+function canRecoverMobileTier(): boolean {
+  if (getStoredMobilePresetOrNull() !== null) return false;
+  const ceiling = resolveDefaultMobilePreset();
+  const currentIndex = MOBILE_PRESET_ORDER.indexOf(getMobilePresetChoice());
+  const ceilingIndex = MOBILE_PRESET_ORDER.indexOf(ceiling);
   return currentIndex >= 0 && currentIndex < ceilingIndex;
 }
 
@@ -456,6 +550,19 @@ export function canRecoverAutoTier(): boolean {
  * authoritative.
  */
 export function reportSustainedRecovery(): boolean {
+  if (getDeviceTier() === 'mobile') {
+    if (!canRecoverMobileTier()) return false;
+    const current = getMobilePresetChoice();
+    const next = MOBILE_PRESET_ORDER[MOBILE_PRESET_ORDER.indexOf(current) + 1];
+    if (!next) return false;
+    _sessionMobilePreset = next;
+    try {
+      console.info(`[quality] sustained mobile stability at '${current}' — preset restored to '${next}'`);
+    } catch (_) { /* ok */ }
+    const preset = getPreset();
+    for (const fn of listeners) fn(preset);
+    return true;
+  }
   if (!canRecoverAutoTier()) return false;
   const current = resolveAutoTier();
   const next = AUTO_ORDER[AUTO_ORDER.indexOf(current) + 1];
@@ -485,13 +592,15 @@ export function getMobilePresetChoice(): MobilePresetName {
       _mobileResetHandled = true;
       if (new URLSearchParams(window.location.search).has('gfxreset')) {
         window.localStorage.removeItem(LS_MOBILE_KEY);
-        return 'mobile';
+        _sessionMobilePreset = null;
+        return resolveDefaultMobilePreset();
       }
     }
     const v = window.localStorage.getItem(LS_MOBILE_KEY);
     if (v === 'mobile-low' || v === 'mobile' || v === 'mobile-high') return v;
   } catch (_) { /* storage blocked — balanced is the safe default */ }
-  return 'mobile';
+  if (_sessionMobilePreset) return _sessionMobilePreset;
+  return resolveDefaultMobilePreset();
 }
 
 /**
@@ -522,6 +631,8 @@ export function resolvePresetName(choice: PresetChoice = getStoredChoice()): Pre
 export function setMobilePresetName(name: string): void {
   if (name !== 'mobile-low' && name !== 'mobile' && name !== 'mobile-high') return;
   try { window.localStorage.setItem(LS_MOBILE_KEY, name); } catch (_) { /* ok */ }
+  // An explicit tap owns the ladder; drop any session governor demotion.
+  _sessionMobilePreset = null;
   const preset = getPreset();
   for (const fn of listeners) fn(preset);
 }
